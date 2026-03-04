@@ -3,6 +3,7 @@ from flask_caching import Cache
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import re
+import os, json
 
 app = Flask(__name__)
 cache = Cache(app, config={"CACHE_TYPE": "SimpleCache"})
@@ -19,10 +20,17 @@ ALLOWED_MARKS = {"⭕", "△", "✕", ""}
 RECENT_TEXT_COLS = ["K", "L", "M"]
 
 def get_sheets_service():
-    creds = Credentials.from_service_account_file(
-        "service_account.json",
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    # 1) 배포 환경(Render 등): 환경변수로 JSON 전체를 넣는 방식
+    if os.environ.get("GOOGLE_CREDENTIALS_JSON"):
+        creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+        creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+
+    # 2) 로컬 개발: 파일로 읽는 방식(기존 유지)
+    else:
+        creds = Credentials.from_service_account_file("service_account.json", scopes=scopes)
+
     return build("sheets", "v4", credentials=creds)
 
 def sheet_name_by_grade(grade: str) -> str:
@@ -233,3 +241,4 @@ def api_apply():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
