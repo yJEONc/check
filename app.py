@@ -19,6 +19,7 @@ ALLOWED_MARKS = {"⭕", "△", "✕", ""}
 # 직전보강 입력 컬럼 (K~M) — 숫자/문자 자유 입력
 RECENT_TEXT_COLS = ["K", "L", "M"]
 
+
 def get_sheets_service():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -33,10 +34,12 @@ def get_sheets_service():
 
     return build("sheets", "v4", credentials=creds)
 
+
 def sheet_name_by_grade(grade: str) -> str:
     if grade not in GRADE_SHEETS:
         raise ValueError("invalid grade")
     return GRADE_SHEETS[grade]
+
 
 def parse_mmdd(s: str):
     """과학일 문자열에서 월/일 추출. 실패하면 None."""
@@ -48,14 +51,48 @@ def parse_mmdd(s: str):
     nums = re.findall(r"\d+", t)
     if len(nums) < 2:
         return None
-    m = int(nums[0]); d = int(nums[1])
+    m = int(nums[0])
+    d = int(nums[1])
     if not (1 <= m <= 12 and 1 <= d <= 31):
         return None
     return (m, d)
 
+
+def parse_period_start(s: str):
+    """시험기간 문자열에서 시작 월/일 추출. 실패하면 None.
+    예: 4/20~4/21, 4.20-4.21, 4-20 ~ 4-21
+    """
+    if not s:
+        return None
+
+    t = str(s).strip()
+    if not t or "미확정" in t:
+        return None
+
+    m = re.search(r"(\d{1,2})\s*[./-]\s*(\d{1,2})", t)
+    if not m:
+        return None
+
+    month = int(m.group(1))
+    day = int(m.group(2))
+
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+
+    return (month, day)
+
+
+def parse_grade_num(s):
+    try:
+        return int(str(s).strip())
+    except:
+        return 999
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 # ✅ 반 목록: 10분 캐시
 @app.get("/api/classes")
@@ -80,6 +117,7 @@ def api_classes():
             classes.append(name)
     classes.sort()
     return jsonify({"ok": True, "grade": grade, "classes": classes})
+
 
 # ✅ 학생 목록(반 단위): 30초 캐시 (A~J까지만)
 @app.get("/api/students")
@@ -126,7 +164,13 @@ def api_students():
 
     return jsonify({"ok": True, "grade": grade, "class": class_name, "students": students})
 
+
 # ✅ 직전보강: 1~3학년 전체(A~M) + 정렬 + K~M 값 포함
+# 정렬 우선순위:
+# 1) 과학일
+# 2) 시험기간 시작일 (빈칸/미확정은 맨 뒤)
+# 3) 학교 이름
+# 4) 학년
 @app.get("/api/recent")
 @cache.cached(timeout=20, query_string=True)
 def api_recent():
@@ -136,7 +180,7 @@ def api_recent():
     for grade, sheet in [("1", "M1"), ("2", "M2"), ("3", "M3")]:
         resp = svc.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{sheet}!A2:M"  # ✅ K~M 포함
+            range=f"{sheet}!A2:M"
         ).execute()
         rows = resp.get("values", [])
 
@@ -150,7 +194,10 @@ def api_recent():
 
             sheet_row = i + 2
             exam_date = str(get(5)).strip()
-            mmdd = parse_mmdd(exam_date)
+            period = str(get(4)).strip()
+
+            science_mmdd = parse_mmdd(exam_date)
+            period_start = parse_period_start(period)
 
             all_students.append({
                 "sheet": sheet,
@@ -160,7 +207,7 @@ def api_recent():
                 "name": get(1),
                 "school": get(2),
                 "range": get(3),
-                "period": get(4),
+                "period": period,
                 "exam_date": exam_date,
 
                 # G~J (읽기 전용 표시용)
@@ -170,25 +217,40 @@ def api_recent():
                 "freq_essay": get(9),
 
                 # K~M (직보 입력)
-                "jb1": get(10),  # K
-                "jb2": get(11),  # L
-                "jb3": get(12),  # M
+                "jb1": get(10),
+                "jb2": get(11),
+                "jb3": get(12),
 
-                "_mmdd": mmdd,
+                # 정렬 보조키
+                "_science_mmdd": science_mmdd,
+                "_period_start": period_start,
             })
 
     def sort_key(st):
-        mmdd = st["_mmdd"]
-        mmdd_key = (99, 99) if mmdd is None else mmdd
-        grade_key = int(st["grade"]) if str(st["grade"]).isdigit() else 9
-        school_key = str(st["school"] or "")
-        return (mmdd_key[0], mmdd_key[1], grade_key, school_key)
+        science_mmdd = st.get("_science_mmdd")
+        science_key = (99, 99) if science_mmdd is None else science_mmdd
+
+        period_start = st.get("_period_start")
+        period_key = (99, 99) if period_start is None else period_start
+
+        school_key = str(st.get("school") or "").strip()
+        grade_key = parse_grade_num(st.get("grade"))
+
+        return (
+            science_key[0], science_key[1],   # 1순위: 과학일
+            period_key[0], period_key[1],     # 2순위: 시험 시작일
+            school_key,                       # 3순위: 학교
+            grade_key                         # 4순위: 학년
+        )
 
     all_students.sort(key=sort_key)
+
     for st in all_students:
-        st.pop("_mmdd", None)
+        st.pop("_science_mmdd", None)
+        st.pop("_period_start", None)
 
     return jsonify({"ok": True, "students": all_students})
+
 
 # ✅ apply: (A) 반 화면: grade 기반 G~J
 #         (B) 직전보강: change마다 sheet 지정 + K~M 지원
@@ -220,7 +282,7 @@ def api_apply():
         if col in CHECK_COLS and value not in ALLOWED_MARKS:
             return jsonify({"ok": False, "error": f"invalid value for {col}: {value}"}), 400
 
-        # K~M은 자유 입력 (너무 길지만 않게)
+        # K~M은 자유 입력
         if col in RECENT_TEXT_COLS and len(value) > 200:
             return jsonify({"ok": False, "error": f"value too long for {col}"}), 400
 
@@ -239,6 +301,6 @@ def api_apply():
     cache.clear()
     return jsonify({"ok": True, "applied": len(updates)})
 
+
 if __name__ == "__main__":
     app.run(debug=True)
-
